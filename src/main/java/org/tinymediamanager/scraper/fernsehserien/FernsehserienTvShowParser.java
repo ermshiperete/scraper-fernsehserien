@@ -22,6 +22,7 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.Charset;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -50,6 +51,7 @@ import org.tinymediamanager.scraper.util.MetadataUtil;
  */
 public class FernsehserienTvShowParser {
 	private static final Logger LOGGER = LoggerFactory.getLogger(org.tinymediamanager.scraper.fernsehserien.FernsehserienTvShowParser.class);
+	private static final ExecutorService executor = Executors.newFixedThreadPool(4);
 
 	private FernsehserienSiteDefinition fernsehserienSite;
 
@@ -125,6 +127,12 @@ public class FernsehserienTvShowParser {
 			options.setCountry(CountryCode.valueOf(country));
 			MediaMetadata md = getMetadata(singleResult.getSeries(), options);
 
+			MediaSearchOptions exactOptions = new MediaSearchOptions(options.getType(), singleResult.getTitle());
+			exactOptions.setCountry(options.getCountry());
+			exactOptions.setLanguage(options.getLanguage());
+			exactOptions.setYear(md.getYear());
+			addOtherProvider(exactOptions, md);
+
 			MediaSearchResult sr = new MediaSearchResult(FernsehserienMetadataProvider.providerInfo.getId(), MediaType.TV_SHOW);
 			sr.setTitle(singleResult.getTitle());
 			sr.setId(singleResult.getSeries());
@@ -145,6 +153,64 @@ public class FernsehserienTvShowParser {
 
 		getLogger().debug("========= END FERNSEHSERIEN Scraper Search for: " + sb.toString());
 		return result;
+	}
+
+	private void addOtherProvider(MediaSearchOptions options, MediaMetadata md) throws Exception {
+		try {
+			Future<List<MediaSearchResult>> futureTheTvDb = getFuture("useTheTvDb", "tvdb", options);
+			Future<List<MediaSearchResult>> futureImdb = getFuture("useImdb", "imdb", options);
+			Future<List<MediaSearchResult>> futureTmdb = getFuture("useTmdb", "tmdb", options);;
+			if (searchSingleProvider(futureTheTvDb, "tvdb", options, md))
+				return;
+			if (searchSingleProvider(futureImdb, "imdb", options, md))
+				return;
+			searchSingleProvider(futureTmdb, "tmdb", options, md);
+		} catch (Exception e) {
+			getLogger().debug("Got exception: " + e);
+		}
+	}
+
+	private Future<List<MediaSearchResult>> getFuture(String key, String providerName, MediaSearchOptions options) {
+		if (FernsehserienMetadataProvider.providerInfo.getConfig().getValueAsBool(key)) {
+			ExecutorCompletionService<List<MediaSearchResult>> completionService = new ExecutorCompletionService<>(executor);
+			Callable<List<MediaSearchResult>> worker = new OtherSearchWorker(providerName, options);
+			return completionService.submit(worker);
+		}
+		return null;
+	}
+
+	private Boolean searchSingleProvider(Future<List<MediaSearchResult>> future, String providerName, MediaSearchOptions options, MediaMetadata md) {
+		if (future != null) {
+			try {
+				List<MediaSearchResult> results = future.get();
+				MediaSearchResult singleResult = null;
+				if (results == null || results.size() == 0)
+					return false;
+				if (results.size() == 1) {
+					singleResult = results.get(0);
+				}
+				else {
+					for (MediaSearchResult result : results) {
+						if ((options.getQuery().equalsIgnoreCase(result.getTitle()) ||
+								options.getQuery().equalsIgnoreCase(result.getOriginalTitle())) &&
+								result.getYear() == options.getYear()) {
+							singleResult = result;
+							break;
+						}
+					}
+				}
+				if (singleResult != null) {
+					md.setId("GenreProvider", providerName);
+					md.setId(providerName, singleResult.getId());
+					options.setImdbId(singleResult.getIMDBId());
+					return true;
+				}
+			}
+			catch (Exception ignored) {
+				getLogger().debug("Got exception trying to search " + providerName + ": " + ignored);
+			}
+		}
+		return false;
 	}
 
 	/*
@@ -266,7 +332,61 @@ public class FernsehserienTvShowParser {
 		// populate id
 		md.setId(FernsehserienMetadataProvider.providerInfo.getId(), fernsehserienId);
 
+		addGenres(md, options);
+
 		return md;
+	}
+
+	private void addGenres(MediaMetadata metadata, MediaScrapeOptions options) {
+		try {
+			MediaSearchOptions searchOptions = new MediaSearchOptions(MediaType.TV_SHOW);
+			searchOptions.setQuery(metadata.getTitle());
+			searchOptions.setCountry(options.getCountry());
+			searchOptions.setLanguage(options.getLanguage());
+			searchOptions.setYear(metadata.getYear());
+
+			addOtherProvider(searchOptions, metadata);
+			options.setImdbId(searchOptions.getImdbId());
+		} catch (Exception e) {
+			getLogger().debug("Got exception adding other provider: " + e);
+		}
+
+		String providerName = metadata.getId("GenreProvider").toString();
+		if (StringUtils.isBlank(providerName))
+			return;
+		String providerId = metadata.getId(providerName).toString();
+		if (StringUtils.isBlank(providerId)) {
+			providerId = options.getImdbId();
+		}
+		if (StringUtils.isBlank(providerId))
+			return;
+
+		MediaScrapeOptions newOptions = new MediaScrapeOptions(options.getType());
+		newOptions.setCountry(options.getCountry());
+		newOptions.setLanguage(options.getLanguage());
+		newOptions.setImdbId(options.getImdbId());
+		newOptions.setTmdbId(options.getTmdbId());
+		if (metadata.getIds() != null) {
+			for (Map.Entry<String, Object> entry : metadata.getIds().entrySet()) {
+				newOptions.setId(entry.getKey(), entry.getValue().toString());
+			}
+		}
+
+		ExecutorCompletionService<MediaMetadata> completionService = new ExecutorCompletionService<>(executor);
+		Callable<MediaMetadata> worker = new OtherMediaMetaDataWorker(providerName, newOptions);
+		Future<MediaMetadata> future = completionService.submit(worker);
+
+		try {
+			MediaMetadata otherMetadata = future.get();
+			if (otherMetadata != null) {
+				for (MediaGenres genre : otherMetadata.getGenres()) {
+					metadata.addGenre(genre);
+				}
+			}
+		}
+		catch (Exception e) {
+			getLogger().debug("Got exception trying to get metadata from " + providerName + ": " + e);
+		}
 	}
 
 	protected MediaMetadata parseInfoPage(Document doc, MediaScrapeOptions options, MediaMetadata md) {

@@ -52,8 +52,9 @@ public class FernsehserienMetadataProvider implements ITvShowMetadataProvider {
 		fernsehserienSite = FernsehserienSiteDefinition.FERNSEHSERIEN_COM;
 
 		// configure/load settings
+		providerInfo.getConfig().addBoolean("useTheTvDb", true);
 		providerInfo.getConfig().addBoolean("useImdb", true);
-		providerInfo.getConfig().addBoolean("localReleaseDate", true);
+		providerInfo.getConfig().addBoolean("useTmdb", true);
 
 		providerInfo.getConfig().load();
 	}
