@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Main-Class: org.tinymediamanager.scraper.fernsehserien.FernsehserienMe
+ tadataProvider
+
