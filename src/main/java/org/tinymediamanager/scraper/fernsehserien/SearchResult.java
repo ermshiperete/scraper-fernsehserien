@@ -15,6 +15,9 @@
  */
 package org.tinymediamanager.scraper.fernsehserien;
 
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * A single search result
  */
@@ -51,9 +54,25 @@ public class SearchResult {
 		return t;
 	}
 
-	public String getCountry()
+	public List<String> getCountries()
 	{
-		return l;
+		String[] parts = l.split(" ");
+		String[] countries = parts[0].split("/");
+		return Arrays.asList(countries);
+	}
+
+	public int getYear()
+	{
+		String[] parts = l.split(" ");
+		if (parts.length < 2)
+			return 0;
+
+		String[] years = parts[1].split("–");
+		if (years.length > 0) {
+			return Integer.parseInt(years[0]);
+		} else {
+			return Integer.parseInt(parts[1]);
+		}
 	}
 
 	public String getSeries()

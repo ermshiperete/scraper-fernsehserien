@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Eberhard Beilharz
+ * Copyright 2017-2018 Eberhard Beilharz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package org.tinymediamanager.scraper.fernsehserien;
 import static org.tinymediamanager.scraper.fernsehserien.FernsehserienMetadataProvider.cleanString;
 import static org.tinymediamanager.scraper.fernsehserien.FernsehserienMetadataProvider.providerInfo;
 
+import java.net.InterfaceAddress;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.Charset;
@@ -47,7 +48,6 @@ import org.tinymediamanager.scraper.util.MetadataUtil;
 /**
  * The class FernsehserienTvShowParser is used to parse TV show site of fernsehserien.com
  *
- * @author Manuel Laggner
  */
 public class FernsehserienTvShowParser {
 	private static final Logger LOGGER = LoggerFactory.getLogger(org.tinymediamanager.scraper.fernsehserien.FernsehserienTvShowParser.class);
@@ -77,8 +77,6 @@ public class FernsehserienTvShowParser {
 	 * @return the found results
 	 */
 	protected List<MediaSearchResult> search(MediaSearchOptions query) throws Exception {
-		List<MediaSearchResult> result = new ArrayList<>();
-
 		String searchTerm = "";
 
 		if (StringUtils.isNotEmpty(query.getQuery())) {
@@ -90,23 +88,36 @@ public class FernsehserienTvShowParser {
 		}
 
 		if (StringUtils.isEmpty(searchTerm)) {
-			return result;
+			return new ArrayList<>();
 		}
 
-		// parse out language and country from the scraper query
-		String language = query.getLanguage().getLanguage();
-		int myear = query.getYear();
-		String country = query.getCountry().getAlpha2(); // for passing the country to the scrape
-
 		searchTerm = MetadataUtil.removeNonSearchCharacters(searchTerm);
+
+		getLogger().debug("========= BEGIN FERNSEHSERIEN Scraper Search for: " + searchTerm);
+
+		List<MediaSearchResult> result = tryFastSearch(query, searchTerm);
+
+		if (result.size() >= 10) {
+			// we got too many results. Try the extended search
+			result = tryFullSearch(query, searchTerm);
+		}
+
+		Collections.sort(result);
+		Collections.reverse(result);
+
+		getLogger().debug("========= END FERNSEHSERIEN Scraper Search for: " + searchTerm);
+		return result;
+	}
+
+	private List<MediaSearchResult> tryFastSearch(MediaSearchOptions query, String searchTerm) throws Exception {
+		List<MediaSearchResult> result = new ArrayList<>();
+		SearchResult[] searchResults;
+		String country = query.getCountry().getAlpha2(); // for passing the country to the scrape
 
 		StringBuilder sb = new StringBuilder(getFernsehserienSite().getSite());
 		sb.append("fastsearch?suchwort=");
 		sb.append(URLEncoder.encode(searchTerm, "UTF-8"));
 
-		getLogger().debug("========= BEGIN FERNSEHSERIEN Scraper Search for: " + sb.toString());
-		Document doc = null;
-		SearchResult[] searchResults;
 		try {
 			URI url = new URI(sb.toString());
 			//url.addHeader("Accept-Language", getAcceptLanguage(language, country));
@@ -125,22 +136,16 @@ public class FernsehserienTvShowParser {
 			options.setId("fernsehserien", singleResult.getSeries());
 			options.setLanguage(query.getLanguage());
 			options.setCountry(CountryCode.valueOf(country));
-			MediaMetadata md = getMetadata(singleResult.getSeries(), options);
-
-			MediaSearchOptions exactOptions = new MediaSearchOptions(options.getType(), singleResult.getTitle());
-			exactOptions.setCountry(options.getCountry());
-			exactOptions.setLanguage(options.getLanguage());
-			exactOptions.setYear(md.getYear());
-			addOtherProvider(exactOptions, md);
 
 			MediaSearchResult sr = new MediaSearchResult(FernsehserienMetadataProvider.providerInfo.getId(), MediaType.TV_SHOW);
 			sr.setTitle(singleResult.getTitle());
 			sr.setId(singleResult.getSeries());
-			sr.setYear(md.getYear());
-			sr.setMetadata(md);
 			sr.setScore(1);
-			sr.setOriginalTitle(md.getOriginalTitle());
 			sr.setPosterUrl(singleResult.getBannerUrl());
+			sr.setYear(singleResult.getYear());
+			MediaMetadata metadata = getMetadata(singleResult.getSeries(), options);
+			sr.setOriginalTitle(metadata.getOriginalTitle());
+			sr.setMetadata(metadata);
 			result.add(sr);
 
 			// only get 40 results
@@ -148,32 +153,131 @@ public class FernsehserienTvShowParser {
 				break;
 			}
 		}
-		Collections.sort(result);
-		Collections.reverse(result);
-
-		getLogger().debug("========= END FERNSEHSERIEN Scraper Search for: " + sb.toString());
 		return result;
+	}
+
+	private List<MediaSearchResult> tryFullSearch(MediaSearchOptions query, String searchTerm) throws Exception {
+		List<MediaSearchResult> result = new ArrayList<>();
+
+		StringBuilder sb = new StringBuilder(getFernsehserienSite().getSite());
+		sb.append("suche/");
+		sb.append(URLEncoder.encode(searchTerm, "UTF-8"));
+
+		try {
+			CachedUrl url = new CachedUrl(sb.toString());
+			url.addHeader("Accept-Language", getAcceptLanguage(query.getLanguage().getLanguage(), query.getCountry().getAlpha2()));
+			Document doc = Jsoup.parse(url.getInputStream(), fernsehserienSite.getCharset().displayName(), "");
+
+			for (Element elem : doc.getElementsByClass("suchergebnis"))
+			{
+				String series = elem.getElementsByTag("a").first().
+						attr("href").substring(1); // trim leading /
+				String title = elem.getElementsByClass("suchergebnis-titel").first().text();
+				String banner = elem.getElementsByClass("suchergebnis-bild").first().
+						getElementsByTag("img").first().attr("src");
+				String wannwo = elem.getElementsByClass("suchergebnis-wannwo").first().ownText();
+				String year = extractNumber(wannwo);
+
+				MediaSearchResult searchResult = new MediaSearchResult(FernsehserienMetadataProvider.providerInfo.getId(), MediaType.TV_SHOW);
+				searchResult.setTitle(title);
+				searchResult.setId(series);
+				searchResult.setScore(1);
+				searchResult.setPosterUrl(banner);
+				searchResult.setYear(Integer.parseInt(year));
+				result.add(searchResult);
+
+				// only get 40 results
+				if (result.size() >= 40) {
+					break;
+				}
+			}
+
+		} catch (Exception e) {
+			getLogger().debug("tried to fetch search response", e);
+		}
+
+		return result;
+	}
+
+	private String extractNumber(String str)
+	{
+		str = trimStart(str);
+		for (int i = 0; i < str.length(); i++) {
+			if (!Character.isDigit(str.charAt(i)))
+				return str.substring(0, i);
+		}
+		return str;
+	}
+
+	private String trimStart(String str)
+	{
+		for (int i = 0; i < 10; i++) {
+			if (str.startsWith(Integer.toString(i))) {
+				return str;
+			}
+		}
+		return trimStart(str.substring(1));
 	}
 
 	private void addOtherProvider(MediaSearchOptions options, MediaMetadata md) throws Exception {
 		try {
-			Future<List<MediaSearchResult>> futureTheTvDb = getFuture("useTheTvDb", "tvdb", options);
-			Future<List<MediaSearchResult>> futureImdb = getFuture("useImdb", "imdb", options);
-			Future<List<MediaSearchResult>> futureTmdb = getFuture("useTmdb", "tmdb", options);;
-			if (searchSingleProvider(futureTheTvDb, "tvdb", options, md))
-				return;
-			if (searchSingleProvider(futureImdb, "imdb", options, md))
-				return;
-			searchSingleProvider(futureTmdb, "tmdb", options, md);
+			MediaSearchOptions movieOptions = new MediaSearchOptions(MediaType.MOVIE, options.getQuery());
+			movieOptions.setCountry(options.getCountry());
+			movieOptions.setLanguage(options.getLanguage());
+			movieOptions.setYear(md.getYear());
+
+			Future<List<MediaSearchResult>> futureTheTvDb = getFutureTvShow("useTheTvDb", "tvdb", options);
+			Future<List<MediaSearchResult>> futureTmdb = getFutureTvShow("useTmdb", "tmdb", options);
+			Future<List<MediaSearchResult>> futureTmdbMovie = getFutureMovie("useTmdb", "tmdb", movieOptions);
+			Future<List<MediaSearchResult>> futureImdb = getFutureTvShow("useImdb", "imdb", options);
+
+			String providerName = md.getId("GenreProvider").toString();
+			if (StringUtils.isBlank(providerName)) {
+				if (searchSingleProvider(futureTheTvDb, "tvdb", options, md))
+					return;
+				if (searchSingleProvider(futureTmdb, "tmdb", options, md)) {
+					md.setId("tmdbKind", "tvshow");
+					return;
+				 }
+				if (searchSingleProvider(futureTmdbMovie, "tmdb", movieOptions, md)) {
+					md.setId("tmdbKind", "movie");
+					return;
+				}
+				searchSingleProvider(futureImdb, "imdb", options, md);
+			} else {
+				switch (providerName)
+				{
+					case "tvdb":
+						searchSingleProvider(futureTheTvDb, "tvdb", options, md);
+						return;
+					case "tmdb":
+						if (searchSingleProvider(futureTmdb, "tmdb", options, md))
+							return;
+						searchSingleProvider(futureTmdbMovie, "tmdb", movieOptions, md);
+						return;
+					case "imdb":
+						searchSingleProvider(futureImdb, "imdb", options, md);
+						return;
+				}
+			}
 		} catch (Exception e) {
 			getLogger().debug("Got exception: " + e);
 		}
 	}
 
-	private Future<List<MediaSearchResult>> getFuture(String key, String providerName, MediaSearchOptions options) {
+	private Future<List<MediaSearchResult>> getFutureTvShow(String key, String providerName, MediaSearchOptions options) {
 		if (FernsehserienMetadataProvider.providerInfo.getConfig().getValueAsBool(key)) {
 			ExecutorCompletionService<List<MediaSearchResult>> completionService = new ExecutorCompletionService<>(executor);
-			Callable<List<MediaSearchResult>> worker = new OtherSearchWorker(providerName, options);
+			Callable<List<MediaSearchResult>> worker = new OtherTvShowSearchWorker(providerName, options);
+			return completionService.submit(worker);
+		}
+		return null;
+	}
+
+	private Future<List<MediaSearchResult>> getFutureMovie(String key, String providerName, MediaSearchOptions options) {
+		if (FernsehserienMetadataProvider.providerInfo.getConfig().getValueAsBool(key)) {
+			ExecutorCompletionService<List<MediaSearchResult>> completionService = new ExecutorCompletionService<>(executor);
+			Callable<List<MediaSearchResult>> worker = new OtherMovieSearchWorker(providerName, options);
 			return completionService.submit(worker);
 		}
 		return null;
@@ -182,6 +286,11 @@ public class FernsehserienTvShowParser {
 	private Boolean searchSingleProvider(Future<List<MediaSearchResult>> future, String providerName, MediaSearchOptions options, MediaMetadata md) {
 		if (future != null) {
 			try {
+				if (!StringUtils.isBlank(md.getId("GenreProvider").toString()) &&
+						!StringUtils.isBlank(md.getId(md.getId("GenreProvider").toString()).toString())) {
+					// searched before - no need to do it again
+					return true;
+				}
 				List<MediaSearchResult> results = future.get();
 				MediaSearchResult singleResult = null;
 				if (results == null || results.size() == 0)
@@ -202,7 +311,16 @@ public class FernsehserienTvShowParser {
 				if (singleResult != null) {
 					md.setId("GenreProvider", providerName);
 					md.setId(providerName, singleResult.getId());
+					if ("tmdb".equals(providerName)) {
+						options.setTmdbId(Integer.parseInt(singleResult.getId()));
+					}
 					options.setImdbId(singleResult.getIMDBId());
+					if (!StringUtils.isBlank(singleResult.getPosterUrl())) {
+						MediaArtwork media = new MediaArtwork(providerName, MediaArtwork.MediaArtworkType.POSTER);
+						media.setDefaultUrl(singleResult.getPosterUrl());
+						md.addMediaArt(media);
+					}
+					md.setId("GenreProviderResult", singleResult);
 					return true;
 				}
 			}
@@ -323,7 +441,7 @@ public class FernsehserienTvShowParser {
 		LOGGER.debug("FERNSEHSERIEN: getTvShowMetadata(fernsehserienId): " + fernsehserienId);
 
 		// get combined data
-		CachedUrl url = new CachedUrl(fernsehserienSite.getSite() + "/" + fernsehserienId);
+		CachedUrl url = new CachedUrl(fernsehserienSite.getSite() + fernsehserienId);
 		url.addHeader("Accept-Language", getAcceptLanguage(options.getLanguage().getLanguage(), options.getCountry().getAlpha2()));
 		Document doc = Jsoup.parse(url.getInputStream(), fernsehserienSite.getCharset().displayName(), "");
 
@@ -347,6 +465,11 @@ public class FernsehserienTvShowParser {
 
 			addOtherProvider(searchOptions, metadata);
 			options.setImdbId(searchOptions.getImdbId());
+			options.setTmdbId(searchOptions.getTmdbId());
+			for (Map.Entry<String, Object> kv : metadata.getIds().entrySet()) {
+				options.setId(kv.getKey(), kv.getValue().toString());
+			}
+			options.setMetadata(metadata);
 		} catch (Exception e) {
 			getLogger().debug("Got exception adding other provider: " + e);
 		}
@@ -361,19 +484,23 @@ public class FernsehserienTvShowParser {
 		if (StringUtils.isBlank(providerId))
 			return;
 
-		MediaScrapeOptions newOptions = new MediaScrapeOptions(options.getType());
-		newOptions.setCountry(options.getCountry());
-		newOptions.setLanguage(options.getLanguage());
+		Callable<MediaMetadata> worker = null;
+		Boolean isMovie = "movie".equals(metadata.getId("tmdbKind"));
+		ExecutorCompletionService<MediaMetadata> completionService = new ExecutorCompletionService<>(executor);
+		MediaScrapeOptions newOptions = new MediaScrapeOptions(isMovie ? MediaType.MOVIE : MediaType.TV_SHOW);
+		newOptions.setMetadata(metadata);
 		newOptions.setImdbId(options.getImdbId());
 		newOptions.setTmdbId(options.getTmdbId());
-		if (metadata.getIds() != null) {
-			for (Map.Entry<String, Object> entry : metadata.getIds().entrySet()) {
-				newOptions.setId(entry.getKey(), entry.getValue().toString());
-			}
-		}
+		newOptions.setLanguage(options.getLanguage());
+		newOptions.setCountry(options.getCountry());
+		newOptions.setId(providerName, providerId);
+		newOptions.setResult((MediaSearchResult)metadata.getId("GenreProviderResult"));
+		if (isMovie) {
+			worker = new OtherMovieMediaMetaDataWorker(providerName, newOptions);
 
-		ExecutorCompletionService<MediaMetadata> completionService = new ExecutorCompletionService<>(executor);
-		Callable<MediaMetadata> worker = new OtherMediaMetaDataWorker(providerName, newOptions);
+		} else {
+			worker = new OtherTvShowMediaMetaDataWorker(providerName, newOptions);
+		}
 		Future<MediaMetadata> future = completionService.submit(worker);
 
 		try {
@@ -390,53 +517,77 @@ public class FernsehserienTvShowParser {
 	}
 
 	protected MediaMetadata parseInfoPage(Document doc, MediaScrapeOptions options, MediaMetadata md) {
-		/* <article>
-				<div class="serie-top-infos">
-				<div class="serie-image-large-header-benachrichtigung no-smartphone">
-				<h1 class="serie-titel">Die Deutschen</h1>
-				<div class="serie-produktionsjahre">D 2008–2010</div>
-				<div class="clear-left"></div>
-				<div class="serie-image-large-header-benachrichtigung only-smartphone">
-				<div class="serie-infos-ausstrahlungsformen">
-				<div class="serie-infos-erstausstrahlung">
-					Deutsche Erstausstrahlung: 26.10.2008
-					<span class="no-wrap">ZDF</span>
-				</div>
-				<div class="serie-infos-alternativtitel">Alternativtitel: Die Deutschen I / Die Deutschen II</div>
-				<div id="serie-info-wrapper" class="serie-info-wrapper wrapped">
-					<div id="serie-info">
-						<p>
-							Zeitreise durch die Jahrhunderte, von Otto dem Großen im 10. Jahrhundert bis zur Ausrufung der ersten Republik durch Philipp Scheidemann im November 1918. Zehnteilige Dokumenationsreihe, die nach prägenden Figuren der deutschen Geschichte gegliedert ist und Einblicke in die verschiedenen Epochen gewährt.
-							<i>(Text: ZDF)</i>
-						</p>
+		/* <div id="stickyheader" style="" class="">
+			<div id="stickyheaderrand"></div>
+			<ul class="serie-header serie-header-banner">
+				<li class="infos">
+					<h1>Die Deutschen</h1>
+					<div class="serie-produktionsjahre">
+						<abbr title="Deutschland">D</abbr>&nbsp;2008–2010
 					</div>
-					<div id="serie-info-shower" class="serie-info-shower">
+				</li>
+				<li class="serie-header-benachrichtigung">
+					<a title="kostenlose E-Mail-Benachrichtigung bei TV-Ausstrahlung oder DVD-Veröffentlichung" class="newsletter-button" target="_blank" onclick="window.open(this.href,'Benachrichtigung','width=450,height=660,toolbar=no,menubar=no,location=no,scrollbar=no');_gaq.push(['_trackEvent', 'wl-serienstart', fs_interner_code, fs_serien_id]);return false;" href="https://www.wunschliste.de/benachrichtigung.pl?s=12765&amp;nd=1&amp;u=f"></a></li><li class="serie-header-suche"><form onsubmit="return submit_suche(this);"><input autocomplete="off" id="input-suchbegriff-2" maxlength="50" required="" name="suchbegriff" placeholder="Serie suchen" onkeyup="fast_search(event,this)" onfocus="fast_search(null,this)" onclick="fast_search(null,this)" onsearch="fast_search(null,this)" type="search"><button type="submit"><img src="/img/btn_suche.svg"></button><ul id="suggestlist-2" data-applied="0"></ul></form> </li><li class="serie-header-suchknopf"><img src="/img/btn_suche.svg" onclick="document.getElementsByTagName('header').item(0).classList.add('show-search');document.getElementById('input-suchbegriff').scrollIntoView();document.getElementById('input-suchbegriff').focus();"></li>
+			</ul>
+			</div>
+			...
+			<article>
+				<div class="serie-top-infos">
+					<div class="serie-infos-ausstrahlungsformen">
+						<div class="serie-infos-ausstrahlungsform">
+							<a href="/die-deutschen/episodenguide/staffel-1/9311">bisher 20 Folgen in 2 Staffeln</a>
+						</div>
+						<div class="serie-infos-ausstrahlungsform">
+							<a href="/die-deutschen/episodenguide/0/12963">Specials</a>
+						</div>
+					</div>
+					<div class="serie-infos-erstausstrahlung">Deutsche Erstausstrahlung: 26.10.2008
+						<span class="no-wrap">ZDF</span>
+					</div>
+					<div class="serie-infos-alternativtitel">Alternativtitel: Die Deutschen I / Die Deutschen II</div>
+					<div class="serie-info-wrapper wrapped" id="serie-info-wrapper">
+						<div id="serie-info">
+							<p>Zeitreise durch die Jahrhunderte, von Otto dem Großen im 10. Jahrhundert bis zur Ausrufung der ersten Republik durch
+								Philipp Scheidemann im November 1918. Zehnteilige Dokumenationsreihe, die nach prägenden Figuren der deutschen Geschichte
+								gegliedert ist und Einblicke in die verschiedenen Epochen gewährt.
+								<i>(Text:&nbsp;ZDF)</i>
+							</p>
+						</div>
+					</div>
+					<div class="serie-beziehungsart">gezeigt bei
+						<a class="bold" href="/terra-x">Terra X</a>
+					</div>
+					<div style="margin-top:10px;" class="fs-btn-container">
+						<a class="fs-btn" href="/die-deutschen/episodenguide">Übersicht mit allen Folgen</a>
+					</div>
 				</div>
-		*/
-		Element element = doc.getElementsByClass("serie-titel").first();
+			</article>
+		 */
+		Element element = doc.getElementsByClass("serie-header").first()
+			.getElementsByClass("infos").first().getElementsByTag("h1").first();
 		if (element != null) {
 			md.setTitle(cleanString(element.text()));
 		}
 		element = doc.getElementsByClass("serie-produktionsjahre").first();
 		if (element != null) {
-			String text = element.text();
+			Elements countries = element.getElementsByTag("abbr");
+			for (Element country: countries) {
+				md.addCountry(country.text());
+				country.remove();
+			}
+			String text = element.text().replace("\n", "").replaceFirst("^(\\s|\u00A0)*(/(\\s|\u00A0)*)?", "");
 			String[] parts = text.split(" ");
-			if (parts != null && parts.length > 1) {
-				String[] countries = parts[0].split("/");
-				for (String country: countries) {
-					md.addCountry(country);
-				}
-				String[] years = parts[1].split("–");
+			if (parts != null && parts.length > 0) {
+				String[] years = parts[0].split("–");
 				if (years.length > 0) {
 					md.setYear(Integer.parseInt(years[0]));
 					if (years.length > 1 && Integer.parseInt(years[1]) <= Calendar.getInstance().get(Calendar.YEAR)) {
 						md.setStatus("Ended");
 					}
+				} else {
+					md.setYear(Integer.parseInt(parts[0]));
 				}
-				else {
-					md.setYear(Integer.parseInt(parts[1]));
-				}
-				if (parts.length > 2) {
+				if (parts.length > 1) {
 					// set original title
 					Pattern titlePattern = Pattern.compile("\\(([^)]+)\\)");
 					Matcher matcher = titlePattern.matcher(element.text());
@@ -507,17 +658,7 @@ public class FernsehserienTvShowParser {
 		md.setEpisodeNumber(episodeNr);
 
 		LOGGER.debug("FERNSEHSERIEN: getEpisodeMetadata(): Looking for season " + seasonNr + ", episodeNr " + episodeNr);
-		// first get the base episode metadata which can be gathered via
-		// getEpisodeList()
-		List<MediaEpisode> episodes = getEpisodeList(options);
-
-		MediaEpisode wantedEpisode = null;
-		for (MediaEpisode episode : episodes) {
-			if (episode.season == seasonNr && episode.episode == episodeNr) {
-				wantedEpisode = episode;
-				break;
-			}
-		}
+		MediaEpisode wantedEpisode = findEpisode(options, seasonNr, episodeNr);
 
 		// we did not find the episode; return
 		if (wantedEpisode == null) {
@@ -615,6 +756,57 @@ public class FernsehserienTvShowParser {
 	}
 
 	/**
+	 * find an episode in the episode overview
+	 *
+	 * @param options the scrape options
+	 * @param seasonNr the season no
+	 * @param episodeNr the episode
+	 * @return the episode or null if not found
+	 * @throws Exception
+	 */
+	MediaEpisode findEpisode(MediaScrapeOptions options, int seasonNr, int episodeNr) throws Exception {
+		// parse the episodes from the ratings overview page (e.g.
+		// https://www.fernsehserien.de/malcolm-mittendrin/episodenguide )
+		String fernsehserienId = options.getId("fernsehserien");
+		if (StringUtils.isBlank(fernsehserienId)) {
+			return null;
+		}
+
+		CachedUrl url = new CachedUrl(fernsehserienSite.getSite() + fernsehserienId + "/episodenguide");
+		url.addHeader("Accept-Language", getAcceptLanguage(options.getLanguage().getLanguage(), options.getCountry().getAlpha2()));
+		Document doc = Jsoup.parse(url.getInputStream(), fernsehserienSite.getCharset().displayName(), "");
+
+		Elements episodeElements = doc.getElementsByAttributeValue("itemprop", "episode");
+		for (Element episode : episodeElements) {
+			// 	1		1.	01		Malcolm, der Held	24.09.2001	Pilot	09.01.2000
+			Elements numbers = episode.getElementsByClass("episodenliste-episodennummer");
+			MediaEpisode me = new MediaEpisode(providerInfo.getId());
+			me.ids.put(providerInfo.getId(), numbers.get(0).attributes().get("data-href"));
+			String seasonStr = numbers.get(1).text();
+			if (StringUtils.isBlank(seasonStr)) {
+				// Specials
+				me.season = 0;
+				if (StringUtils.isBlank(numbers.get(0).text()))
+					me.episode = 0;
+				else
+					me.episode = Integer.parseInt(numbers.get(0).text());
+			} else {
+				me.season = Integer.parseInt(seasonStr.substring(0, seasonStr.length() - 1)); // remove .
+				me.episode = Integer.parseInt(numbers.get(2).text());
+			}
+			Element title = episode.getElementsByClass("episodenliste-titel").first();
+			me.title = title.getElementsByAttributeValue("itemprop", "name").text();
+			me.firstAired = episode.getElementsByClass("episodenliste-ea").first().text();
+
+			if (me.season == seasonNr && me.episode == episodeNr) {
+				return me;
+			}
+		}
+
+		return null;
+	}
+
+	/**
 	 * parse the episode list from the ratings overview
 	 *
 	 * @param options the scrape options
@@ -635,32 +827,29 @@ public class FernsehserienTvShowParser {
 		url.addHeader("Accept-Language", getAcceptLanguage(options.getLanguage().getLanguage(), options.getCountry().getAlpha2()));
 		Document doc = Jsoup.parse(url.getInputStream(), fernsehserienSite.getCharset().displayName(), "");
 
-		Elements seasons = doc.getElementsByAttributeValue("itemprop", "season");
-		for (Element season : seasons) {
-			Elements episodeElements = season.getElementsByAttributeValue("itemprop", "episode");
-			for (Element episode : episodeElements) {
-				// 	1		1.	01		Malcolm, der Held	24.09.2001	Pilot	09.01.2000
-				Elements numbers = episode.getElementsByClass("episodenliste-episodennummer");
-				MediaEpisode me = new MediaEpisode(providerInfo.getId());
-				me.ids.put(providerInfo.getId(), numbers.get(0).attributes().get("data-href"));
-				String seasonStr = numbers.get(1).text();
-				if (StringUtils.isBlank(seasonStr)) {
-					// Specials
-					me.season = 0;
-					if (StringUtils.isBlank(numbers.get(0).text()))
-						me.episode = 0;
-					else
-						me.episode = Integer.parseInt(numbers.get(0).text());
-				} else {
-					me.season = Integer.parseInt(seasonStr.substring(0, seasonStr.length() - 1)); // remove .
-					me.episode = Integer.parseInt(numbers.get(2).text());
-				}
-				Element title = episode.getElementsByClass("episodenliste-titel").first();
-				me.title = title.getElementsByAttributeValue("itemprop", "name").text();
-				me.firstAired = episode.getElementsByClass("episodenliste-ea").first().text();
-
-				episodes.add(me);
+		Elements episodeElements = doc.getElementsByAttributeValue("itemprop", "episode");
+		for (Element episode : episodeElements) {
+			// 	1		1.	01		Malcolm, der Held	24.09.2001	Pilot	09.01.2000
+			Elements numbers = episode.getElementsByClass("episodenliste-episodennummer");
+			MediaEpisode me = new MediaEpisode(providerInfo.getId());
+			me.ids.put(providerInfo.getId(), numbers.get(0).attributes().get("data-href"));
+			String seasonStr = numbers.get(1).text();
+			if (StringUtils.isBlank(seasonStr)) {
+				// Specials
+				me.season = 0;
+				if (StringUtils.isBlank(numbers.get(0).text()))
+					me.episode = 0;
+				else
+					me.episode = Integer.parseInt(numbers.get(0).text());
+			} else {
+				me.season = Integer.parseInt(seasonStr.substring(0, seasonStr.length() - 1)); // remove .
+				me.episode = Integer.parseInt(numbers.get(2).text());
 			}
+			Element title = episode.getElementsByClass("episodenliste-titel").first();
+			me.title = title.getElementsByAttributeValue("itemprop", "name").text();
+			me.firstAired = episode.getElementsByClass("episodenliste-ea").first().text();
+
+			episodes.add(me);
 		}
 
 		return episodes;

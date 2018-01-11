@@ -17,17 +17,17 @@ package org.tinymediamanager.scraper.fernsehserien;
 
 import org.tinymediamanager.scraper.MediaSearchOptions;
 import org.tinymediamanager.scraper.MediaSearchResult;
-import org.tinymediamanager.scraper.mediaprovider.ITvShowMetadataProvider;
+import org.tinymediamanager.scraper.mediaprovider.IMovieMetadataProvider;
 import org.tinymediamanager.scraper.util.PluginManager;
 
 import java.util.List;
 import java.util.concurrent.Callable;
 
-class OtherSearchWorker implements Callable<List<MediaSearchResult>> {
+class OtherMovieSearchWorker implements Callable<List<MediaSearchResult>> {
 	private MediaSearchOptions options;
 	private String otherProviderName;
 
-	public OtherSearchWorker(String otherProviderName, MediaSearchOptions options) {
+	public OtherMovieSearchWorker(String otherProviderName, MediaSearchOptions options) {
 		this.options = options;
 		this.otherProviderName = otherProviderName;
 	}
@@ -35,9 +35,9 @@ class OtherSearchWorker implements Callable<List<MediaSearchResult>> {
 	@Override
 	public List<MediaSearchResult> call() throws Exception {
 		try {
-			ITvShowMetadataProvider otherProvider = null;
-			List<ITvShowMetadataProvider> providers = PluginManager.getInstance().getPluginsForInterface(ITvShowMetadataProvider.class);
-			for (ITvShowMetadataProvider provider : providers) {
+			IMovieMetadataProvider otherProvider = null;
+			List<IMovieMetadataProvider> providers = PluginManager.getInstance().getPluginsForInterface(IMovieMetadataProvider.class);
+			for (IMovieMetadataProvider provider : providers) {
 				if (otherProviderName.equals(provider.getProviderInfo().getId())) {
 					otherProvider = provider;
 					break;

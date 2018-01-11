@@ -23,11 +23,11 @@ import org.tinymediamanager.scraper.util.PluginManager;
 import java.util.List;
 import java.util.concurrent.Callable;
 
-class OtherMediaMetaDataWorker implements Callable<MediaMetadata> {
+class OtherTvShowMediaMetaDataWorker implements Callable<MediaMetadata> {
 	private MediaScrapeOptions options;
 	private String otherProviderName;
 
-	public OtherMediaMetaDataWorker(String otherProviderName, MediaScrapeOptions options) {
+	public OtherTvShowMediaMetaDataWorker(String otherProviderName, MediaScrapeOptions options) {
 		this.options = options;
 		this.otherProviderName = otherProviderName;
 	}
